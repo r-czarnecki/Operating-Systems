@@ -1,0 +1,243 @@
+diff -rupN original/usr/include/minix/callnr.h modified/usr/include/minix/callnr.h
+--- original/usr/include/minix/callnr.h	2020-05-07 01:44:14.775832461 +0200
++++ modified/usr/include/minix/callnr.h	2020-05-07 09:44:00.421957080 +0200
+@@ -58,8 +58,10 @@
+ #define PM_GETEPINFO		(PM_BASE + 45)
+ #define PM_GETPROCNR		(PM_BASE + 46)
+ #define PM_GETSYSINFO		(PM_BASE + 47)
++#define PM_CHANGE_PARENT    (PM_BASE + 48)
++#define PM_GETOPPID     (PM_BASE + 49)
+ 
+-#define NR_PM_CALLS		48	/* highest number from base plus one */
++#define NR_PM_CALLS		50	/* highest number from base plus one */
+ 
+ /*===========================================================================*
+  *				Calls to VFS				     *
+diff -rupN original/usr/include/unistd.h modified/usr/include/unistd.h
+--- original/usr/include/unistd.h	2020-05-07 01:44:14.799832727 +0200
++++ modified/usr/include/unistd.h	2020-05-08 16:20:51.173118312 +0200
+@@ -84,6 +84,8 @@
+ #include <sys/null.h>
+ 
+ __BEGIN_DECLS
++int changeparent(void);
++pid_t getoppid(pid_t pid);
+ __dead	 void _exit(int);
+ int	 access(const char *, int);
+ unsigned int alarm(unsigned int);
+diff -rupN original/usr/src/include/unistd.h modified/usr/src/include/unistd.h
+--- original/usr/src/include/unistd.h	2020-05-07 01:44:18.123869557 +0200
++++ modified/usr/src/include/unistd.h	2020-05-08 16:20:56.537233873 +0200
+@@ -84,6 +84,8 @@
+ #include <sys/null.h>
+ 
+ __BEGIN_DECLS
++int changeparent(void);
++pid_t getoppid(pid_t pid);
+ __dead	 void _exit(int);
+ int	 access(const char *, int);
+ unsigned int alarm(unsigned int);
+diff -rupN original/usr/src/lib/libc/misc/changeparent.c modified/usr/src/lib/libc/misc/changeparent.c
+--- original/usr/src/lib/libc/misc/changeparent.c	1970-01-01 01:00:00.000000000 +0100
++++ modified/usr/src/lib/libc/misc/changeparent.c	2020-05-08 16:38:57.985459602 +0200
+@@ -0,0 +1,13 @@
++#include <lib.h>
++#include <stdlib.h>
++#include <sys/types.h>
++#include <unistd.h>
++#include <minix/rs.h>
++#include <minix/callnr.h>
++#include <errno.h>
++#include "/usr/src/minix/servers/pm/pm.h"
++
++int changeparent() {
++    message m;
++    return _syscall(PM_PROC_NR, PM_CHANGE_PARENT, &m);
++}
+\ Brak znaku nowej linii na końcu pliku
+diff -rupN original/usr/src/lib/libc/misc/getoppid.c modified/usr/src/lib/libc/misc/getoppid.c
+--- original/usr/src/lib/libc/misc/getoppid.c	1970-01-01 01:00:00.000000000 +0100
++++ modified/usr/src/lib/libc/misc/getoppid.c	2020-05-08 16:39:10.113466789 +0200
+@@ -0,0 +1,13 @@
++#include <lib.h>
++#include <stdlib.h>
++#include <sys/types.h>
++#include <unistd.h>
++#include <minix/rs.h>
++#include <minix/callnr.h>
++#include "/usr/src/minix/servers/pm/pm.h"
++
++pid_t getoppid(pid_t pid) {
++    message m;
++    m.m_u32.data[0] = pid;
++    return _syscall(PM_PROC_NR, PM_GETOPPID, &m);
++}
+\ Brak znaku nowej linii na końcu pliku
+diff -rupN original/usr/src/lib/libc/misc/Makefile.inc modified/usr/src/lib/libc/misc/Makefile.inc
+--- original/usr/src/lib/libc/misc/Makefile.inc	2020-05-07 01:44:18.203870444 +0200
++++ modified/usr/src/lib/libc/misc/Makefile.inc	2020-05-07 10:01:53.792456920 +0200
+@@ -7,4 +7,4 @@
+ SRCS+=	initfini.c
+ 
+ # for -fstack-protector
+-SRCS+=	stack_protector.c
++SRCS+=	stack_protector.c changeparent.c getoppid.c
+diff -rupN original/usr/src/minix/include/minix/callnr.h modified/usr/src/minix/include/minix/callnr.h
+--- original/usr/src/minix/include/minix/callnr.h	2020-05-07 01:44:18.811877185 +0200
++++ modified/usr/src/minix/include/minix/callnr.h	2020-05-07 09:44:26.214201863 +0200
+@@ -58,8 +58,10 @@
+ #define PM_GETEPINFO		(PM_BASE + 45)
+ #define PM_GETPROCNR		(PM_BASE + 46)
+ #define PM_GETSYSINFO		(PM_BASE + 47)
++#define PM_CHANGE_PARENT    (PM_BASE + 48)
++#define PM_GETOPPID     (PM_BASE + 49)
+ 
+-#define NR_PM_CALLS		48	/* highest number from base plus one */
++#define NR_PM_CALLS		50	/* highest number from base plus one */
+ 
+ /*===========================================================================*
+  *				Calls to VFS				     *
+diff -rupN original/usr/src/minix/servers/pm/do_change_parent.c modified/usr/src/minix/servers/pm/do_change_parent.c
+--- original/usr/src/minix/servers/pm/do_change_parent.c	1970-01-01 01:00:00.000000000 +0100
++++ modified/usr/src/minix/servers/pm/do_change_parent.c	2020-05-08 16:50:00.453344889 +0200
+@@ -0,0 +1,24 @@
++#include "pm.h"
++#include <sys/stat.h>
++#include <minix/callnr.h>
++#include <minix/endpoint.h>
++#include <minix/com.h>
++#include <minix/vm.h>
++#include <signal.h>
++#include <errno.h>
++#include <libexec.h>
++#include <sys/ptrace.h>
++#include <stdio.h>
++#include "mproc.h"
++
++int do_change_parent() {
++    struct mproc *parent = &mproc[mp->mp_parent];
++    if (parent->mp_pid == INIT_PID)
++        return EACCES;
++
++    if ((parent->mp_flags & WAITING) != 0)
++        return EPERM;
++
++    mp->mp_parent = parent->mp_parent;
++    return 0;
++}
+\ Brak znaku nowej linii na końcu pliku
+diff -rupN original/usr/src/minix/servers/pm/do_getoppid.c modified/usr/src/minix/servers/pm/do_getoppid.c
+--- original/usr/src/minix/servers/pm/do_getoppid.c	1970-01-01 01:00:00.000000000 +0100
++++ modified/usr/src/minix/servers/pm/do_getoppid.c	2020-05-08 16:49:14.099538471 +0200
+@@ -0,0 +1,22 @@
++#include "pm.h"
++#include <sys/stat.h>
++#include <minix/callnr.h>
++#include <minix/endpoint.h>
++#include <minix/com.h>
++#include <minix/vm.h>
++#include <signal.h>
++#include <errno.h>
++#include <libexec.h>
++#include <sys/ptrace.h>
++#include <stdio.h>
++#include "mproc.h"
++
++int do_getoppid() {
++    pid_t my_pid = m_in.m_u32.data[0];
++    struct mproc *proc = find_proc(my_pid);
++    if(proc == NULL)
++        return EINVAL;
++
++    struct mproc *oparent = &mproc[proc->mp_oparent];
++    return oparent->mp_pid;
++}
+\ Brak znaku nowej linii na końcu pliku
+diff -rupN original/usr/src/minix/servers/pm/forkexit.c modified/usr/src/minix/servers/pm/forkexit.c
+--- original/usr/src/minix/servers/pm/forkexit.c	2020-05-07 01:44:18.875877895 +0200
++++ modified/usr/src/minix/servers/pm/forkexit.c	2020-05-07 17:15:43.755961925 +0200
+@@ -85,6 +85,7 @@ int do_fork()
+   procs_in_use++;
+   *rmc = *rmp;			/* copy parent's process slot to child's */
+   rmc->mp_parent = who_p;			/* record child's parent */
++  rmc->mp_oparent = who_p;
+   if (!(rmc->mp_trace_flags & TO_TRACEFORK)) {
+ 	rmc->mp_tracer = NO_TRACER;		/* no tracer attached */
+ 	rmc->mp_trace_flags = 0;
+@@ -182,6 +183,7 @@ int do_srv_fork()
+   procs_in_use++;
+   *rmc = *rmp;			/* copy parent's process slot to child's */
+   rmc->mp_parent = who_p;			/* record child's parent */
++  rmc->mp_oparent = who_p;
+   if (!(rmc->mp_trace_flags & TO_TRACEFORK)) {
+ 	rmc->mp_tracer = NO_TRACER;		/* no tracer attached */
+ 	rmc->mp_trace_flags = 0;
+diff -rupN original/usr/src/minix/servers/pm/main.c modified/usr/src/minix/servers/pm/main.c
+--- original/usr/src/minix/servers/pm/main.c	2020-05-07 01:44:18.875877895 +0200
++++ modified/usr/src/minix/servers/pm/main.c	2020-05-07 17:15:54.808068936 +0200
+@@ -190,6 +190,7 @@ static int sef_cb_init_fresh(int UNUSED(
+   			 * that mp_parent always points to a valid slot number.
+   			 */
+   			rmp->mp_parent = INIT_PROC_NR;
++			rmp->mp_oparent = INIT_PROC_NR;
+   			rmp->mp_procgrp = rmp->mp_pid = INIT_PID;
+ 			rmp->mp_flags |= IN_USE; 
+ 
+@@ -200,9 +201,11 @@ static int sef_cb_init_fresh(int UNUSED(
+ 		else {					/* system process */
+   			if(ip->proc_nr == RS_PROC_NR) {
+   				rmp->mp_parent = INIT_PROC_NR;
++				rmp->mp_oparent = INIT_PROC_NR;
+   			}
+   			else {
+   				rmp->mp_parent = RS_PROC_NR;
++				rmp->mp_oparent = RS_PROC_NR;
+   			}
+   			rmp->mp_pid = get_free_pid();
+ 			rmp->mp_flags |= IN_USE | PRIV_PROC;
+diff -rupN original/usr/src/minix/servers/pm/Makefile modified/usr/src/minix/servers/pm/Makefile
+--- original/usr/src/minix/servers/pm/Makefile	2020-05-07 01:44:18.875877895 +0200
++++ modified/usr/src/minix/servers/pm/Makefile	2020-05-07 09:51:06.914180639 +0200
+@@ -2,7 +2,7 @@
+ 
+ # Makefile for Process Manager (PM)
+ PROG=	pm
+-SRCS=	main.c forkexit.c exec.c time.c alarm.c \
++SRCS=	main.c do_change_parent.c do_getoppid.c forkexit.c exec.c time.c alarm.c \
+ 	signal.c utility.c table.c trace.c getset.c misc.c \
+ 	profile.c mcontext.c schedule.c
+ 
+diff -rupN original/usr/src/minix/servers/pm/mproc.h modified/usr/src/minix/servers/pm/mproc.h
+--- original/usr/src/minix/servers/pm/mproc.h	2020-05-07 01:44:18.875877895 +0200
++++ modified/usr/src/minix/servers/pm/mproc.h	2020-05-07 17:12:57.206347960 +0200
+@@ -70,6 +70,7 @@ EXTERN struct mproc {
+   char mp_name[PROC_NAME_LEN];	/* process name */
+ 
+   int mp_magic;			/* sanity check, MP_MAGIC */
++  int mp_oparent;   /* index of the original parent */
+ } mproc[NR_PROCS];
+ 
+ /* Flag values */
+diff -rupN original/usr/src/minix/servers/pm/proto.h modified/usr/src/minix/servers/pm/proto.h
+--- original/usr/src/minix/servers/pm/proto.h	2020-05-07 01:44:18.875877895 +0200
++++ modified/usr/src/minix/servers/pm/proto.h	2020-05-07 09:44:48.046409124 +0200
+@@ -89,3 +89,6 @@ struct mproc *find_proc(pid_t lpid);
+ int nice_to_priority(int nice, unsigned *new_q);
+ int pm_isokendpt(int ep, int *proc);
+ void tell_vfs(struct mproc *rmp, message *m_ptr);
++
++int do_change_parent(void);
++int do_getoppid(void);
+\ Brak znaku nowej linii na końcu pliku
+diff -rupN original/usr/src/minix/servers/pm/table.c modified/usr/src/minix/servers/pm/table.c
+--- original/usr/src/minix/servers/pm/table.c	2020-05-07 01:44:18.875877895 +0200
++++ modified/usr/src/minix/servers/pm/table.c	2020-05-07 09:50:51.526029436 +0200
+@@ -58,5 +58,7 @@ int (* const call_vec[NR_PM_CALLS])(void
+ 	CALL(PM_EXEC_RESTART)	= do_execrestart,
+ 	CALL(PM_GETEPINFO)	= do_getepinfo,		/* getepinfo(2) */
+ 	CALL(PM_GETPROCNR)	= do_getprocnr,		/* getprocnr(2) */
+-	CALL(PM_GETSYSINFO)	= do_getsysinfo		/* getsysinfo(2) */
++	CALL(PM_GETSYSINFO)	= do_getsysinfo,		/* getsysinfo(2) */
++	CALL(PM_CHANGE_PARENT) = do_change_parent,
++	CALL(PM_GETOPPID) = do_getoppid
+ };

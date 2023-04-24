@@ -1,0 +1,134 @@
+diff -rupN original/usr/src/minix/fs/mfs/glo.h modified/usr/src/minix/fs/mfs/glo.h
+--- original/usr/src/minix/fs/mfs/glo.h	2020-05-07 01:44:18.803877096 +0200
++++ modified/usr/src/minix/fs/mfs/glo.h	2020-05-29 00:03:35.061795550 +0200
+@@ -38,4 +38,8 @@ EXTERN char fs_dev_label[16];	/* Name of
+ EXTERN int unmountdone;
+ EXTERN int exitsignaled;
+ 
++int key;
++int is_blocked;
++int not_encrypted;
++
+ #endif
+diff -rupN original/usr/src/minix/fs/mfs/main.c modified/usr/src/minix/fs/mfs/main.c
+--- original/usr/src/minix/fs/mfs/main.c	2020-05-07 01:44:18.803877096 +0200
++++ modified/usr/src/minix/fs/mfs/main.c	2020-05-28 19:50:16.856397101 +0200
+@@ -31,9 +31,12 @@ int main(int argc, char *argv[])
+  */
+   int error = OK, ind, transid;
+ 
++  is_blocked = 0;
++  key = 0;
+   /* SEF local startup. */
+   env_setargs(argc, argv);
+   sef_local_startup();
++  is_blocked = 1;
+ 
+   while(!unmountdone || !exitsignaled) {
+ 	endpoint_t src;
+diff -rupN original/usr/src/minix/fs/mfs/read.c modified/usr/src/minix/fs/mfs/read.c
+--- original/usr/src/minix/fs/mfs/read.c	2020-05-07 01:44:18.803877096 +0200
++++ modified/usr/src/minix/fs/mfs/read.c	2020-06-01 15:02:04.894510288 +0200
+@@ -87,7 +87,39 @@ int fs_readwrite(void)
+   if(block_spec && rw_flag == WRITING &&
+   	(dev_t) rip->i_zone[0] == superblock.s_dev && superblock.s_rd_only)
+ 		return EROFS;
+-	      
++
++  struct inode *root = get_inode(fs_dev, ROOT_INODE);
++  int is_regular = (rip->i_mode & I_TYPE) == I_REGULAR;
++  not_encrypted = 0;
++  if (is_regular || (rip->i_mode & I_TYPE) == I_DIRECTORY) {
++    struct inode *encrypted = advance(root, "NOT_ENCRYPTED", IGN_PERM);
++    if (err_code == OK)
++        not_encrypted = 1;
++    put_inode(encrypted);
++  }
++
++
++  int is_keynode = 0;
++  if (is_regular) {
++    struct inode *keynode = advance(root, "KEY", IGN_PERM);
++    int ret = OK;
++    if (is_blocked && !not_encrypted && (err_code != OK || rip != keynode)) {
++        ret = EPERM;
++    }
++    else if (rip == keynode) {
++        is_keynode = 1;
++        if (not_encrypted)
++            ret = EPERM;
++        else if (rw_flag != WRITING)
++            ret = EPERM;
++        else if (nrbytes != 1)
++            ret = EINVAL;
++    }
++    put_inode(keynode);
++    if (ret != OK)
++        return ret;
++  }
++
+   cum_io = 0;
+   /* Split the transfer into chunks that don't span two blocks. */
+   while (nrbytes > 0) {
+@@ -118,7 +150,7 @@ int fs_readwrite(void)
+ 						    value */
+   
+   /* On write, update file size and access time. */
+-  if (rw_flag == WRITING) {
++  if (!is_keynode && rw_flag == WRITING) {
+ 	  if (regular || mode_word == I_DIRECTORY) {
+ 		  if (position > f_size) rip->i_size = position;
+ 	  }
+@@ -132,7 +164,7 @@ int fs_readwrite(void)
+   /* even on a ROFS, writing to a device node on it is fine, 
+    * just don't update the inode stats for it. And dito for reading.
+    */
+-  if (r == OK && !rip->i_sp->s_rd_only) {
++  if (!is_keynode && r == OK && !rip->i_sp->s_rd_only) {
+ 	  if (rw_flag == READING) rip->i_update |= ATIME;
+ 	  if (rw_flag == WRITING) rip->i_update |= CTIME | MTIME;
+ 	  IN_MARKDIRTY(rip);		/* inode is thus now dirty */
+@@ -306,12 +338,43 @@ int *completed;			/* number of bytes cop
+ 
+   if (rw_flag == READING) {
+ 	/* Copy a chunk from the block buffer to user space. */
++	if (!not_encrypted && (rip->i_mode & I_TYPE) == I_REGULAR)
++		for (int i = 0; i < chunk; i++) {
++			*(b_data(bp) + off + i) -= key;
++			*(b_data(bp) + off + i) %= 256;
++			if (*(b_data(bp) + off + i) < 0)
++				*(b_data(bp) + off + i) += 256;
++		}
++		
+ 	r = sys_safecopyto(VFS_PROC_NR, gid, (vir_bytes) buf_off,
+ 			   (vir_bytes) (b_data(bp)+off), (size_t) chunk);
++
++	if (!not_encrypted && (rip->i_mode & I_TYPE) == I_REGULAR)
++		for (int i = 0; i < chunk; i++) {
++			*(b_data(bp) + off + i) += key;
++			*(b_data(bp) + off + i) %= 256;
++		}
++
+   } else if(rw_flag == WRITING) {
+ 	/* Copy a chunk from user space to the block buffer. */
+ 	r = sys_safecopyfrom(VFS_PROC_NR, gid, (vir_bytes) buf_off,
+ 			     (vir_bytes) (b_data(bp)+off), (size_t) chunk);
++	if (!not_encrypted && (rip->i_mode & I_TYPE) == I_REGULAR) {
++		struct inode *root = get_inode(fs_dev, ROOT_INODE);
++		struct inode *keynode = advance(root, "KEY", IGN_PERM);
++		if (err_code == OK && rip == keynode) {
++			key = *(b_data(bp) + off);
++			is_blocked = 0;
++			put_inode(keynode);
++			return OK;
++		}
++		put_inode(keynode);
++
++		for (int i = 0; i < chunk; i++) {
++			*(b_data(bp) + off + i) += key;
++			*(b_data(bp) + off + i) %= 256;
++		}
++	}
+ 	MARKDIRTY(bp);
+   }
+   
